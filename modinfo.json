@@ -5,7 +5,7 @@
   "name": "True Color Layer",
   "authors": [ "XenonFaux" ],
   "description": "Adds a map tab that renders terrain using actual block colors. Logic based on gi-map by Marat Zaripov.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "dependencies": {
     "game": "1.21.6"
   }

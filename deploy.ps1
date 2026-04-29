@@ -1,5 +1,7 @@
 $src  = Split-Path $PSCommandPath -Parent
-$src  = Join-Path $src "bin\Debug\Mods\mod"
+$src  = Join-Path $src "bin"
+$conf = Get-ChildItem $src | Where-Object { $_.PSIsContainer } | Select-Object -First 1 -ExpandProperty Name
+$src  = Join-Path $src "$conf\Mods\mod"
 $dest = Join-Path $env:APPDATA "VintagestoryData\Mods\truecolorlayer"
 
 if (!(Test-Path $src)) { Write-Error "Source not found: $src"; exit 1 }

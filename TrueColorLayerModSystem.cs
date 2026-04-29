@@ -1,3 +1,4 @@
+using System.IO;
 using System.Reflection;
 using System.Text;
 using HarmonyLib;
@@ -24,15 +25,16 @@ namespace TrueColorLayer
         {
             return typeof(WorldMapManager)
                 .GetMethod("getTabsOrdered",
-                    BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!;
         }
 
         [HarmonyPostfix]
         public static void Postfix(ref List<string> __result)
         {
             if (__result == null) return;
-            int i = __result.FindIndex(x => x == "terrain");
+            
             __result.Remove("truecolorlayer");
+            int i = __result.FindIndex(x => x == "terrain");
 
             if (TrueColorLayerModSystem.Config != null && TrueColorLayerModSystem.Config.ReplaceDefaultMap)
             {
@@ -48,7 +50,8 @@ namespace TrueColorLayer
             }
             else
             {
-                __result.Insert(i >= 0 ? Math.Min(i + 1, __result.Count) : __result.Count, "truecolorlayer");
+                int insertAt = i >= 0 ? Math.Min(i + 1, __result.Count) : __result.Count;
+                __result.Insert(insertAt, "truecolorlayer");
             }
         }
     }
@@ -59,9 +62,11 @@ namespace TrueColorLayer
     {
         public static void Postfix(ChunkMapLayer __instance, ref string __result)
         {
-            if (__instance is AccurateColorMapLayer)
+            if (__instance is AccurateColorMapLayer && !string.IsNullOrEmpty(__result))
             {
-                __result = __result.Replace(".db", "-accurate.db");
+                string dir = Path.GetDirectoryName(__result) ?? "";
+                string filename = Path.GetFileNameWithoutExtension(__result) + "-accurate.db";
+                __result = Path.Combine(dir, filename);
             }
         }
     }
@@ -69,6 +74,8 @@ namespace TrueColorLayer
     // ─── Map layer: Inherit the original map renderer but force color mode ─────
     public class AccurateColorMapLayer : ChunkMapLayer
     {
+        private static readonly FieldInfo? colorAccurateField = typeof(ChunkMapLayer).GetField("colorAccurate", BindingFlags.Instance | BindingFlags.NonPublic);
+
         public override string Title => "True Color";
         public override string LayerGroupCode => "truecolorlayer";
 
@@ -81,11 +88,7 @@ namespace TrueColorLayer
             base.OnMapOpenedClient();
             
             // Force the original renderer to use color-accurate mode for this specific layer
-            var field = typeof(ChunkMapLayer).GetField("colorAccurate", BindingFlags.Instance | BindingFlags.NonPublic);
-            if (field != null)
-            {
-                field.SetValue(this, true);
-            }
+            colorAccurateField?.SetValue(this, true);
         }
 
         public override void OnMouseMoveClient(MouseEvent args, GuiElementMap mapElem, StringBuilder hoverText)
@@ -104,7 +107,9 @@ namespace TrueColorLayer
             IMapChunk mc = capi.World.BlockAccessor.GetMapChunk(pos.X / GlobalConstants.ChunkSize, pos.Z / GlobalConstants.ChunkSize);
             if (mc != null)
             {
-                pos.Y = mc.RainHeightMap[(pos.Z % GlobalConstants.ChunkSize) * GlobalConstants.ChunkSize + (pos.X % GlobalConstants.ChunkSize)];
+                int lx = GameMath.Mod(pos.X, GlobalConstants.ChunkSize);
+                int lz = GameMath.Mod(pos.Z, GlobalConstants.ChunkSize);
+                pos.Y = mc.RainHeightMap[lz * GlobalConstants.ChunkSize + lx];
             }
             else
             {
@@ -113,7 +118,7 @@ namespace TrueColorLayer
 
             if (pos.Y > 0)
             {
-                ClimateCondition cond = capi.World.BlockAccessor.GetClimateAt(pos, EnumGetClimateMode.ForSuppliedDate_TemperatureOnly, capi.World.Calendar.TotalDays);
+                ClimateCondition cond = capi.World.BlockAccessor.GetClimateAt(pos, EnumGetClimateMode.NowValues, capi.World.Calendar.TotalDays);
                 if (cond != null)
                 {
                     hoverText.AppendLine($"Temp: {Math.Round(cond.Temperature, 1)}°C, Rainfall: {Math.Round(cond.Rainfall * 100)}%");
@@ -127,7 +132,7 @@ namespace TrueColorLayer
     {
         private const string PatchId = "truecolorlayer.patches";
         private Harmony? _harmony;
-        public static TrueColorLayerConfig Config { get; private set; }
+        public static TrueColorLayerConfig Config { get; private set; } = null!;
 
         public override void StartPre(ICoreAPI api)
         {
