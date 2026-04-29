@@ -62,14 +62,4 @@
         </Content>
     </ItemGroup>
 
-    <!-- Deploy as a folder mod — avoids VS zip-reader issues entirely -->
-    <Target Name="InstallModFolder" AfterTargets="Build">
-        <PropertyGroup>
-            <ModSrc>$(MSBuildProjectDirectory)\$(OutputPath)</ModSrc>
-            <ModsDest>$(APPDATA)\VintagestoryData\Mods\truecolorlayer</ModsDest>
-            <DeployScript>$(MSBuildProjectDirectory)\deploy.ps1</DeployScript>
-        </PropertyGroup>
-        <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(DeployScript)&quot;" />
-    </Target>
-
 </Project>

@@ -95,8 +95,7 @@ namespace TrueColorLayer
         {
             base.OnMouseMoveClient(args, mapElem, hoverText);
 
-            var capi = mapElem.Api as ICoreClientAPI;
-            if (capi == null) return;
+            if (mapElem.Api is not ICoreClientAPI capi) return;
 
             Vec3d worldPos = new Vec3d();
             mapElem.TranslateViewPosToWorldPos(new Vec2f(args.X, args.Y), ref worldPos);
@@ -121,7 +120,11 @@ namespace TrueColorLayer
                 ClimateCondition cond = capi.World.BlockAccessor.GetClimateAt(pos, EnumGetClimateMode.NowValues, capi.World.Calendar.TotalDays);
                 if (cond != null)
                 {
-                    hoverText.AppendLine($"Temp: {Math.Round(cond.Temperature, 1)}°C, Rainfall: {Math.Round(cond.Rainfall * 100)}%");
+                    if (hoverText.Length > 0 && hoverText[hoverText.Length - 1] != '\n')
+                    {
+                        hoverText.AppendLine();
+                    }
+                    hoverText.Append($"Temp: {cond.Temperature:F1}°C, Rainfall: {cond.Rainfall * 100:F0}%");
                 }
             }
         }
