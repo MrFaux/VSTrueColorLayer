@@ -29,13 +29,12 @@ namespace TrueColorLayer
         private HashSet<FastVec2i> curVisibleChunks = new HashSet<FastVec2i>();
         private ConcurrentQueue<ReadyMapPiece> readyMapPieces = new ConcurrentQueue<ReadyMapPiece>();
         private Dictionary<FastVec2i, MapPieceDB> toSaveList = new Dictionary<FastVec2i, MapPieceDB>();
-        private object toSaveListLock = new object();
         private ConcurrentDictionary<FastVec2i, MultiChunkMapComponent> loadedMapData = new ConcurrentDictionary<FastVec2i, MultiChunkMapComponent>();
         private float mtThread1secAccum;
         private float genAccum;
         private float diskSaveAccum;
 
-        public override string Title => "TrueColorLayer";
+        public override string Title => "Colored";
         public override string LayerGroupCode => "truecolorlayer";
         public override EnumMapAppSide DataSide => EnumMapAppSide.Client;
         public override EnumMinMagFilter MinFilter => EnumMinMagFilter.Linear;
@@ -96,8 +95,8 @@ namespace TrueColorLayer
         [ThreadStatic]
         static byte[] tempReusable = null!;
         
-        // Cache for IsSeasonalSnow results (thread-safe)
-        static ConcurrentDictionary<string, bool> snowCache = new ConcurrentDictionary<string, bool>();
+        // Cache for IsSeasonalSnow results
+        static Dictionary<string, bool> snowCache = new Dictionary<string, bool>();
         
         // Generate chunk image with snow-skipping and height-based shading
         public int[] GenerateChunkImage(FastVec2i chunkPos, IMapChunk mc)
@@ -118,24 +117,26 @@ namespace TrueColorLayer
             IMapChunk chunkNeibW = world.BlockAccessor.GetMapChunk(chunkPos.X - 1, chunkPos.Y);
             IMapChunk chunkNeibN = world.BlockAccessor.GetMapChunk(chunkPos.X, chunkPos.Y - 1);
 
-            for (int i = 0; i < result.Length; i++)
-            {
-                int lx = i % chunksize;
-                int lz = i / chunksize;
-                int heightIndex = lz * chunksize + lx;
-
-                int surfaceY = mc.RainHeightMap[heightIndex];
-                if (surfaceY <= 0)
-                {
-                    result[i] = 0;
-                    continue;
-                }
-
-                // Calculate height-based shading (from original ChunkMapLayer)
-                float b = 1f;
-
-                int topX = lx - 1;
-                int leftZ = lz - 1;
+             for (int i = 0; i < result.Length; i++)
+             {
+                 int lx = i % chunksize;
+                 int lz = i / chunksize;
+                 int heightIndex = lz * chunksize + lx;
+ 
+                 int surfaceY = mc.RainHeightMap[heightIndex];
+                 if (surfaceY <= 0)
+                 {
+                     result[i] = 0;
+                     continue;
+                 }
+ 
+                 BlockPos surfacePos = new BlockPos(lx, surfaceY, lz);
+ 
+                 // Calculate height-based shading (from original ChunkMapLayer)
+                 float b = 1f;
+ 
+                 int topX = lx - 1;
+                 int leftZ = lz - 1;
                 
                 // Handle chunk boundaries - FIXED: use else-if to avoid overwriting
                 IMapChunk leftTopMapChunk = mc;
@@ -171,59 +172,63 @@ namespace TrueColorLayer
                 int rightTop = rightTopMapChunk == null ? 0 : (surfaceY - rightTopMapChunk.RainHeightMap[lz * chunksize + actualTopX]);
                 int leftBot = leftBotMapChunk == null ? 0 : (surfaceY - leftBotMapChunk.RainHeightMap[actualLeftZ * chunksize + lx]);
 
-                float slopedir = Math.Sign(leftTop) + Math.Sign(rightTop) + Math.Sign(leftBot);
-                float steepness = Math.Max(Math.Max(Math.Abs(leftTop), Math.Abs(rightTop)), Math.Abs(leftBot));
+                 float slopedir = Math.Sign(leftTop) + Math.Sign(rightTop) + Math.Sign(leftBot);
+                 float steepness = Math.Max(Math.Max(Math.Abs(leftTop), Math.Abs(rightTop)), Math.Abs(leftBot));
 
-                if (slopedir > 0) b = 1.08f + Math.Min(0.5f, steepness / 10f) / 1.25f;
-                if (slopedir < 0) b = 0.92f - Math.Min(0.5f, steepness / 10f) / 1.25f;
+                 // Enhanced height-based shading for more noticeable mountains
+                 // Increase effect strength and make it more responsive to height differences
+                 float heightFactor = Math.Min(1.0f, steepness / 8.0f); // Increased sensitivity
+                 if (slopedir > 0) 
+                     b = 1.12f + heightFactor * 0.4f; // Brighter slopes facing up
+                 else if (slopedir < 0) 
+                     b = 0.88f - heightFactor * 0.4f; // Darker slopes facing down
+                 else 
+                     b = 1.0f; // Flat areas
 
                 shadowMap[i] = (byte)Math.Max(0, Math.Min(255, 128 * b));
 
-                // Get surface block
-                var surfacePos = new BlockPos(
-                    lx + chunkPos.X * chunksize,
-                    surfaceY,
-                    lz + chunkPos.Y * chunksize);
-                
+// Get surface block
                 var block = world.BlockAccessor.GetBlock(surfacePos);
                 
-                // Skip seasonal snow blocks - use block below instead (preserve permafrost)
-                if (TrueColorLayerModSystem.Config?.DisableSnowInWinter == true &&
-                    block != null && IsSeasonalSnow(block))
-                {
-                    // Look for block below seasonal snow
-                    for (int y = surfaceY - 1; y > Math.Max(0, surfaceY - 10); y--)
-                    {
-                        var belowPos = new BlockPos(surfacePos.X, y, surfacePos.Z);
-                        var blockBelow = world.BlockAccessor.GetBlock(belowPos);
-                        if (blockBelow == null) continue;
-                        if (blockBelow.Id != 0 && !IsSeasonalSnow(blockBelow!))
-                        {
-                            block = blockBelow;
-                            surfacePos = belowPos;
-                            break;
-                        }
-                    }
-                }
-
-                // Get color-accurate color
-                if (block != null && block.Id != 0)
-                {
-                    int color = block.GetColor(capi!, surfacePos);
-                    // Set alpha to 255 (fully opaque) - required for rendering
-                    if (color != 0)
-                    {
-                        result[i] = (color & 0x00FFFFFF) | (255 << 24);
-                    }
-                    else
-                    {
-                        result[i] = 0;
-                    }
-                }
-                else
-                {
-                    result[i] = 0;
-                }
+                 // Skip seasonal snow and ice blocks - use block below instead (preserve permafrost/glacier ice)
+                 if (TrueColorLayerModSystem.Config?.DisableSnowInWinter == true &&
+                     block != null && (IsSeasonalSnow(block) || IsSeasonalIce(block)))
+                 {
+                     // Look for block below seasonal snow/ice
+                     for (int y = surfaceY - 1; y > Math.Max(0, surfaceY - 10); y--)
+                     {
+                         var belowPos = new BlockPos(surfacePos.X, y, surfacePos.Z);
+                         var blockBelow = world.BlockAccessor.GetBlock(belowPos);
+                         if (blockBelow == null) continue;
+                         if (!IsSeasonalSnow(blockBelow!) && !IsSeasonalIce(blockBelow!))
+                         {
+                             block = blockBelow;
+                             surfacePos = belowPos;
+                             break;
+                         }
+                     }
+                 }
+                 
+                  // Get color-accurate color - use flower color if available
+                  Block? flowerBlock = IsFlowerOrVegetation(block) ? block : null;
+                  Block? colorBlock = flowerBlock ?? block;
+                  if (colorBlock != null && colorBlock.Id != 0)
+                  {
+                      int color = colorBlock.GetColor(capi!, surfacePos);
+                      // Set alpha to 255 (fully opaque) - required for rendering
+                      if (color != 0)
+                      {
+                          result[i] = (color & 0x00FFFFFF) | (255 << 24);
+                      }
+                      else
+                      {
+                          result[i] = 0;
+                      }
+}
+                  else
+                  {
+                      result[i] = 0;
+                  }
             }
 
             // Apply simple blur to shadow map for smooth transitions
@@ -322,6 +327,74 @@ namespace TrueColorLayer
             return result;
         }
 
+        // Check if block is seasonal lake ice (not glacier/permafrost ice)
+        private bool IsSeasonalIce(Block block)
+        {
+            if (block == null) return false;
+            
+            string path = block.Code?.Path?.ToLowerInvariant() ?? "";
+            
+            // Skip glacier ice and permafrost ice - preserve these as ice
+            if (path.Contains("glacierice") || path.Contains("permafrostice") || 
+                path.Contains("glacier") || path.Contains("permafrost"))
+            {
+                return false;
+            }
+            
+            // Check by block material - Ice material includes lake ice
+            if (block.BlockMaterial == EnumBlockMaterial.Ice)
+            {
+                return true;
+            }
+            
+            // Check by code path for ice blocks (like "lakeice", "ice", etc.)
+            if (path.Contains("ice") && (path == "ice" || path.StartsWith("ice-") || path.Contains("lakeice")))
+            {
+                return true;
+            }
+            
+            return false;
+        }
+
+        // Check if block is a flower or vegetation that should show its color on map
+        private bool IsFlowerOrVegetation(Block? block)
+        {
+            if (block == null) return false;
+            
+            string path = block.Code?.Path?.ToLowerInvariant() ?? "";
+            
+            // Check by block material - Plant material is vegetation
+            if (block.BlockMaterial == EnumBlockMaterial.Plant)
+            {
+                return true;
+            }
+            
+            // Check by code path for flowers and vegetation
+            if (path.Contains("flower") || path.Contains("mushroom") || 
+                path.Contains("fern") || path.Contains("tallgrass") ||
+                path.Contains("clover") || path.Contains("bush") ||
+                path.Contains("sapling") || path.Contains("seaweed") ||
+                path.Contains("kelp") || path.Contains("algae") ||
+                path.Contains("reeds") || path.Contains("cattail") ||
+                path.Contains("crystals") || path.Contains("coral") ||
+                path.Contains("starfish") || path.Contains("shell") ||
+                path.Contains("bones") || path.Contains("skull") ||
+                path.Contains("feather") || path.Contains("egg") ||
+                path.Contains("nest") || path.Contains("berries") ||
+                path.Contains("berry"))
+            {
+                return true;
+            }
+            
+            // Also check for short grass and plant variants
+            if (path.Contains("grass") && (path.Contains("-") || path.Contains("short")))
+            {
+                return true;
+            }
+            
+            return false;
+        }
+
         // Background chunk generation (from VS-GeologyMap)
         public override void OnOffThreadTick(float dt)
         {
@@ -356,10 +429,7 @@ namespace TrueColorLayer
                             LoadFromChunkPixels(cord, piece.Pixels);
                         }
                     }
-                    catch (Exception ex)
-                    {
-                        capi?.World.Logger.Error($"[TrueColorLayer] Error loading map piece from db: {ex.Message}");
-                    }
+                    catch { }
                     continue;
                 }
 
@@ -373,21 +443,15 @@ namespace TrueColorLayer
                     continue;
                 }
 
-                lock (toSaveListLock)
-                {
-                    toSaveList[cord.Copy()] = new MapPieceDB() { Pixels = pixels };
-                }
+                toSaveList[cord.Copy()] = new MapPieceDB() { Pixels = pixels };
                 LoadFromChunkPixels(cord, pixels);
             }
 
-            lock (toSaveListLock)
+            if (toSaveList.Count > 100 || diskSaveAccum > 4f)
             {
-                if (toSaveList.Count > 100 || diskSaveAccum > 4f)
-                {
-                    diskSaveAccum = 0;
-                    mapdb!.SetMapPieces(toSaveList);
-                    toSaveList.Clear();
-                }
+                diskSaveAccum = 0;
+                mapdb!.SetMapPieces(toSaveList);
+                toSaveList.Clear();
             }
         }
 
@@ -591,7 +655,6 @@ namespace TrueColorLayer
                 {
                     val?.ActuallyDispose();
                 }
-                loadedMapData.Clear();
             }
             base.Dispose();
         }
@@ -618,23 +681,17 @@ namespace TrueColorLayer
             base.StartPre(api);
             if (api.Side != EnumAppSide.Client) return;
 
-            bool configNewlyCreated = false;
             try
             {
                 Config = api.LoadModConfig<TrueColorLayerConfig>("truecolorlayer.json") ?? new TrueColorLayerConfig();
-                configNewlyCreated = api.LoadModConfig<TrueColorLayerConfig>("truecolorlayer.json") == null;
                 api.Logger.Notification($"[TrueColorLayer] Config loaded. DisableSnowInWinter={Config.DisableSnowInWinter}, ReplaceDefaultMap={Config.ReplaceDefaultMap}");
             }
-            catch (Exception ex)
+            catch
             {
                 Config = new TrueColorLayerConfig();
-                configNewlyCreated = true;
-                api.Logger.Warning("[TrueColorLayer] Failed to load config, using defaults: " + ex.Message);
+                api.Logger.Warning("[TrueColorLayer] Failed to load config, using defaults.");
             }
-            if (configNewlyCreated)
-            {
-                api.StoreModConfig(Config, "truecolorlayer.json");
-            }
+            api.StoreModConfig(Config, "truecolorlayer.json");
 
             // Only patch tab ordering (no more snow patch needed!)
             if (Harmony.HasAnyPatches(PatchId)) return;
