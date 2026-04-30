@@ -1,3 +1,7 @@
 {
-  "worldmap-layer-truecolorlayer": "True Color"
+  "worldmap-layer-truecolorlayer": "True Terrain",
+  "config-truecolorlayer-replacedefaultmap": "Replace default map",
+  "config-truecolorlayer-replacedefaultmap-desc": "Replace the default terrain map with the True Terrain map",
+  "config-truecolorlayer-disablesnowinwinter": "Disable snow in winter",
+  "config-truecolorlayer-disablesnowinwinter-desc": "Prevent snow from being rendered on the map during winter"
 }
