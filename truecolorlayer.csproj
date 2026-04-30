@@ -1,0 +1,92 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net8.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+    <AssemblyName>truecolorlayer</AssemblyName>
+    <RootNamespace>truecolorlayer</RootNamespace>
+        <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+        <OutputPath>bin\$(Configuration)\Mods\mod</OutputPath>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Reference Include="VintagestoryAPI">
+            <HintPath>$(VINTAGE_STORY)/VintagestoryAPI.dll</HintPath>
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="VSSurvivalMod">
+            <HintPath>$(VINTAGE_STORY)/Mods/VSSurvivalMod.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+        <Reference Include="VSEssentials">
+            <HintPath>$(VINTAGE_STORY)/Mods/VSEssentials.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+        <Reference Include="VSCreativeMod">
+            <HintPath>$(VINTAGE_STORY)/Mods/VSCreativeMod.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+        <Reference Include="Newtonsoft.Json">
+            <HintPath>$(VINTAGE_STORY)/Lib/Newtonsoft.Json.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+        <Reference Include="0Harmony">
+            <HintPath>$(VINTAGE_STORY)/Lib/0Harmony.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+        <Reference Include="VintagestoryLib">
+            <HintPath>$(VINTAGE_STORY)/VintagestoryLib.dll</HintPath>
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="protobuf-net">
+            <HintPath>$(VINTAGE_STORY)/Lib/protobuf-net.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+        <Reference Include="cairo-sharp">
+            <HintPath>$(VINTAGE_STORY)/Lib/cairo-sharp.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+        <Reference Include="Microsoft.Data.Sqlite">
+            <HintPath>$(VINTAGE_STORY)/Lib/Microsoft.Data.Sqlite.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+    </ItemGroup>
+
+    <ItemGroup>
+        <Content Include="modinfo.json">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </Content>
+        <Content Include="truecolorlayer.json">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </Content>
+        <Content Include="assets\**\*">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </Content>
+    </ItemGroup>
+
+    <ItemGroup>
+        <Compile Remove="Github_Source\**" />
+        <Content Remove="Github_Source\**" />
+        <None Remove="Github_Source\**" />
+    </ItemGroup>
+
+    <!-- Deploy only necessary files -->
+    <Target Name="InstallModFolder" AfterTargets="Build">
+        <PropertyGroup>
+            <ModSrc>$(MSBuildProjectDirectory)\$(OutputPath)</ModSrc>
+            <ModsDest>$(APPDATA)\VintagestoryData\Mods\truecolorlayer</ModsDest>
+        </PropertyGroup>
+        <MakeDir Directories="$(ModsDest)\assets" Condition="!Exists('$(ModsDest)\assets')" />
+        <!-- Copy only the DLL and essential files -->
+        <Copy SourceFiles="$(ModSrc)TrueColorLayer.dll" DestinationFolder="$(ModsDest)" SkipUnchangedFiles="true" />
+        <Copy SourceFiles="$(MSBuildProjectDirectory)\modinfo.json" DestinationFolder="$(ModsDest)" SkipUnchangedFiles="true" />
+        <Copy SourceFiles="$(MSBuildProjectDirectory)\truecolorlayer.json" DestinationFolder="$(ModsDest)" SkipUnchangedFiles="true" />
+        <!-- Copy assets folder recursively -->
+        <ItemGroup>
+            <AssetsFiles Include="$(MSBuildProjectDirectory)\assets\**\*" />
+        </ItemGroup>
+        <Copy SourceFiles="@(AssetsFiles)" DestinationFolder="$(ModsDest)\assets\%(RecursiveDir)" SkipUnchangedFiles="true" />
+    </Target>
+
+</Project>

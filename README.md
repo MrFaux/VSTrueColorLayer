@@ -1,6 +1,6 @@
-# Colored Map
+# TrueColorLayer
 
-A client-side mod for [Vintage Story](https://www.vintagestory.at/) that adds a "Colored" map tab with true block colors, 3D height-based shading, and automatic seasonal snow-skipping. Shows your world in satellite-like detail - spot biomes, ore patches, and base layouts easily.
+A client-side mod for [Vintage Story](https://www.vintagestory.at/) that adds a "TrueColorLayer" map tab with true block colors, 3D height-based shading, and automatic seasonal snow-skipping. Shows your world in satellite-like detail - spot biomes, ore patches, and base layouts easily.
 
 ## Features
 *   **True Block Colors:** Renders map using actual block colors (like color-accurate mode)
@@ -34,7 +34,7 @@ Edit `VintagestoryData/ModConfig/truecolorlayer.json`:
 ## Installation
 1.  Download the latest release.
 2.  Place the `.zip` file into your `VintagestoryData/Mods` folder.
-3.  Open your map in-game (`M` by default) and select the **"Colored"** tab.
+3.  Open your map in-game (`M` by default) and select the **"TrueColorLayer"** tab.
 
 ## Compatibility
 Tested and optimized for Vintage Story **1.21.6+**.
