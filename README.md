@@ -1,17 +1,40 @@
-# True Color Layer
+# Colored Map
 
-A client-side mod for [Vintage Story](https://www.vintagestory.at/) that adds a high-fidelity terrain view to the world map interface using actual block colors.
+A client-side mod for [Vintage Story](https://www.vintagestory.at/) that adds a "Colored" map tab with true block colors, 3D height-based shading, and optional seasonal snow-skipping.
 
 ## Features
-*   **Toggleable View:** Seamlessly switch between the classic "Paper" map and the new "True Color" terrain view via a dedicated tab.
-*   **True Color Rendering:** Forces high-fidelity color accuracy, making it easier to identify biomes, ore outcroppings, and structures.
-*   **Client-Side Only:** Works on multiplayer servers without needing the mod installed on the server.
-*   **Performance Focused:** Built using native rendering logic to minimize overhead.
+*   **True Block Colors:** Renders map using actual block colors (like color-accurate mode)
+*   **3D Shading:** Height-based shading creates depth perception (brighten slopes up, darken slopes down)
+*   **Snow-Skipping:** Optional feature replaces seasonal snow with the ground below (preserves permafrost/glacier)
+*   **Performance Optimized:** Reuses buffers (ThreadStatic), caches snow lookups, preserves cache between map opens
+*   **Client-Side Only:** Works on multiplayer servers without needing the mod installed on the server
+
+## Configuration
+Edit `VintagestoryData/ModConfig/truecolorlayer.json`:
+```json
+{
+  "ReplaceDefaultMap": false,     // Set true to replace the default "Paper" map tab
+  "DisableSnowInWinter": true    // Skip seasonal snow (default: true, preserves permafrost/glacier)
+}
+```
+
+## Changelog
+
+### v1.2.0 (Current)
+- **Snow-Skipping:** Seasonal snow replaced with ground below (configurable via `DisableSnowInWinter`)
+- **Performance:** ThreadStatic buffers, snow lookup cache (`snowCache`)
+- **3D Shading:** Height-based shading like original map (brighten/darken slopes)
+- **Config:** `DisableSnowInWinter: true` by default, preserves permafrost/glacier ice
+- **Cache:** Preserves rendered chunks between map opens (no unnecessary redraws)
+
+### v1.1.1
+- Initial release with true block colors
+- Based on gi-map by Marat Zaripov
 
 ## Installation
 1.  Download the latest release.
 2.  Place the `.zip` file into your `VintagestoryData/Mods` folder.
-3.  Open your map in-game (`M` by default) to see the new tab.
+3.  Open your map in-game (`M` by default) and select the **"Colored"** tab.
 
 ## Compatibility
 Tested and optimized for Vintage Story **1.21.6+**.

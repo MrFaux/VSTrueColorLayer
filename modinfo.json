@@ -4,8 +4,8 @@
   "modid": "truecolorlayer",
   "name": "Colored",
   "authors": [ "XenonFaux" ],
-  "description": "Adds a Colored map tab with true block colors and optional snow-skipping.",
-  "version": "1.1.1",
+  "description": "Adds a Colored map tab with true block colors, 3D shading, and optional snow-skipping (DisableSnowInWinter config, true by default). Preserves permafrost/glacier.",
+  "version": "1.2.0",
   "dependencies": {
     "game": "1.21.6"
   }
