@@ -1,0 +1,12 @@
+{
+  "type": "code",
+  "side": "client",
+  "modid": "truecolorlayer",
+  "name": "TrueColorLayer",
+  "authors": [ "XenonFaux" ],
+  "description": "Adds a TrueColorLayer map tab with true block colors, 3D height-based shading, seasonal snow-skipping (shows ground below snow, preserves permafrost/glacier), lake ice removal (shows water), and colored foliage/flower dots on map. Client-side only.",
+  "version": "1.3.0",
+  "dependencies": {
+    "game": "1.21.6"
+  }
+}

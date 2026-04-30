@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
 using System.Text;
 using HarmonyLib;
@@ -32,7 +34,6 @@ namespace TrueColorLayer
         private ConcurrentDictionary<FastVec2i, MultiChunkMapComponent> loadedMapData = new ConcurrentDictionary<FastVec2i, MultiChunkMapComponent>();
         private float mtThread1secAccum;
         private float genAccum;
-        private float diskSaveAccum;
 
         public override string Title => "Colored";
         public override string LayerGroupCode => "truecolorlayer";
@@ -67,11 +68,6 @@ namespace TrueColorLayer
             return Path.Combine(dir, api.World.SavegameIdentifier + "-truecolor.db");
         }
 
-        public override void OnLoaded()
-        {
-            // Initialization when map layer is loaded
-        }
-
         public override void OnMapOpenedClient()
         {
             base.OnMapOpenedClient();
@@ -95,8 +91,8 @@ namespace TrueColorLayer
         [ThreadStatic]
         static byte[] tempReusable = null!;
         
-        // Cache for IsSeasonalSnow results
-        static Dictionary<string, bool> snowCache = new Dictionary<string, bool>();
+        // Thread-safe cache for IsSeasonalSnow results
+        static ConcurrentDictionary<string, bool> snowCache = new ConcurrentDictionary<string, bool>();
         
         // Generate chunk image with snow-skipping and height-based shading
         public int[] GenerateChunkImage(FastVec2i chunkPos, IMapChunk mc)
@@ -130,7 +126,13 @@ namespace TrueColorLayer
                     continue;
                 }
 
-                // Calculate height-based shading (from original ChunkMapLayer)
+                // World-space position — BlockAccessor requires world coords, not chunk-local
+                BlockPos surfacePos = new BlockPos(
+                    chunkPos.X * chunksize + lx,
+                    surfaceY,
+                    chunkPos.Y * chunksize + lz);
+ 
+                // Calculate height-based shading
                 float b = 1f;
 
                 int topX = lx - 1;
@@ -173,30 +175,29 @@ namespace TrueColorLayer
                 float slopedir = Math.Sign(leftTop) + Math.Sign(rightTop) + Math.Sign(leftBot);
                 float steepness = Math.Max(Math.Max(Math.Abs(leftTop), Math.Abs(rightTop)), Math.Abs(leftBot));
 
-                if (slopedir > 0) b = 1.08f + Math.Min(0.5f, steepness / 10f) / 1.25f;
-                if (slopedir < 0) b = 0.92f - Math.Min(0.5f, steepness / 10f) / 1.25f;
+                float heightFactor = Math.Min(1.0f, steepness / 8.0f);
+                if (slopedir > 0)
+                    b = 1.12f + heightFactor * 0.4f; // Brighter: slopes facing up/light
+                else if (slopedir < 0)
+                    b = 0.88f - heightFactor * 0.4f; // Darker: slopes facing down/away
+                else
+                    b = 1.0f; // Flat
 
                 shadowMap[i] = (byte)Math.Max(0, Math.Min(255, 128 * b));
 
-                // Get surface block
-                var surfacePos = new BlockPos(
-                    lx + chunkPos.X * chunksize,
-                    surfaceY,
-                    lz + chunkPos.Y * chunksize);
-                
+                // Get surface block (world-space coords already set in surfacePos)
                 var block = world.BlockAccessor.GetBlock(surfacePos);
-                
-                // Skip seasonal snow blocks - use block below instead (preserve permafrost)
+
+                // Skip seasonal snow/ice — show the terrain underneath instead
                 if (TrueColorLayerModSystem.Config?.DisableSnowInWinter == true &&
-                    block != null && IsSeasonalSnow(block))
+                    block != null && (IsSeasonalSnow(block) || IsSeasonalIce(block)))
                 {
-                    // Look for block below seasonal snow
                     for (int y = surfaceY - 1; y > Math.Max(0, surfaceY - 10); y--)
                     {
                         var belowPos = new BlockPos(surfacePos.X, y, surfacePos.Z);
                         var blockBelow = world.BlockAccessor.GetBlock(belowPos);
                         if (blockBelow == null) continue;
-                        if (blockBelow.Id != 0 && !IsSeasonalSnow(blockBelow!))
+                        if (!IsSeasonalSnow(blockBelow) && !IsSeasonalIce(blockBelow))
                         {
                             block = blockBelow;
                             surfacePos = belowPos;
@@ -205,19 +206,11 @@ namespace TrueColorLayer
                     }
                 }
 
-                // Get color-accurate color
+                // Sample block color (vegetation uses its own color; fallback to block color)
                 if (block != null && block.Id != 0)
                 {
                     int color = block.GetColor(capi!, surfacePos);
-                    // Set alpha to 255 (fully opaque) - required for rendering
-                    if (color != 0)
-                    {
-                        result[i] = (color & 0x00FFFFFF) | (255 << 24);
-                    }
-                    else
-                    {
-                        result[i] = 0;
-                    }
+                    result[i] = color != 0 ? (color & 0x00FFFFFF) | (255 << 24) : 0;
                 }
                 else
                 {
@@ -295,95 +288,154 @@ namespace TrueColorLayer
             
             string code = block.Code?.ToString() ?? "";
             
-            // Check cache first
+            // Thread-safe cache check
             if (snowCache.TryGetValue(code, out bool cached)) return cached;
-            
+
             string path = block.Code?.Path?.ToLowerInvariant() ?? "";
-            
-            // Preserve permafrost/glacier ice - these are not seasonal snow
+
+            // Preserve permafrost/glacier — not seasonal snow
             if (path.Contains("glacier") || path.Contains("permafrost"))
             {
-                snowCache[code] = false;
+                snowCache.TryAdd(code, false);
                 return false;
             }
-            
-            // Check by block material - Snow material includes seasonal snow
+
+            // Snow block material is the authoritative check
             if (block.BlockMaterial == EnumBlockMaterial.Snow)
             {
-                snowCache[code] = true;
+                snowCache.TryAdd(code, true);
                 return true;
             }
-            
-            // Check by code path (handles seasonal snow variants like "snow-1", "snow-2", etc.)
-            // but NOT "snowblock" which is a building block, not seasonal snow
+
+            // Code-path fallback: "snow", "snow-N" but not "snowblock" (building material)
             bool result = (path == "snow" || path.StartsWith("snow-")) && !path.Contains("block");
-            snowCache[code] = result;
+            snowCache.TryAdd(code, result);
             return result;
         }
 
-        // Background chunk generation (from VS-GeologyMap)
-        public override void OnOffThreadTick(float dt)
+        // Check if block is seasonal lake ice (not glacier/permafrost ice)
+        private bool IsSeasonalIce(Block block)
         {
-            genAccum += dt;
-            if (genAccum < 0.1f) return;
-            genAccum = 0;
+            if (block == null) return false;
+            
+            string path = block.Code?.Path?.ToLowerInvariant() ?? "";
 
-            int quantityToGen = chunksToGen.Count;
-            while (quantityToGen > 0)
+            // Glacier/permafrost ice is permanent — not seasonal, so preserve it
+            if (path.Contains("glacier") || path.Contains("permafrost"))
             {
-                if (mapSink.IsShuttingDown) break;
-                quantityToGen--;
-
-                FastVec2i cord;
-                lock (chunksToGenLock)
-                {
-                    if (chunksToGen.Count == 0) break;
-                    cord = chunksToGen.Dequeue();
-                }
-
-                var testPos = new BlockPos(cord.X * GlobalConstants.ChunkSize, 1, cord.Y * GlobalConstants.ChunkSize);
-                if (!api.World.BlockAccessor.IsValidPos(testPos)) continue;
-
-                IMapChunk mc = capi!.World.BlockAccessor.GetMapChunk(cord.X, cord.Y);
-                if (mc == null)
-                {
-                    try
-                    {
-                        MapPieceDB piece = mapdb.GetMapPiece(cord);
-                        if (piece?.Pixels != null)
-                        {
-                            LoadFromChunkPixels(cord, piece.Pixels);
-                        }
-                    }
-                    catch { }
-                    continue;
-                }
-
-                int[] pixels = GenerateChunkImage(cord, mc);
-                if (pixels == null)
-                {
-                    lock (chunksToGenLock)
-                    {
-                        chunksToGen.Enqueue(cord);
-                    }
-                    continue;
-                }
-
-                toSaveList[cord.Copy()] = new MapPieceDB() { Pixels = pixels };
-                LoadFromChunkPixels(cord, pixels);
+                return false;
             }
-
-            if (toSaveList.Count > 100 || diskSaveAccum > 4f)
+            
+            // Check by block material - Ice material includes lake ice
+            if (block.BlockMaterial == EnumBlockMaterial.Ice)
             {
-                diskSaveAccum = 0;
-                mapdb!.SetMapPieces(toSaveList);
-                toSaveList.Clear();
+                return true;
             }
+            
+            // Check by code path for ice blocks (like "lakeice", "ice", etc.)
+            if (path.Contains("ice") && (path == "ice" || path.StartsWith("ice-") || path.Contains("lakeice")))
+            {
+                return true;
+            }
+            
+            return false;
+        }
+
+        // Check if block is a flower or vegetation that should show its color on map
+        private bool IsFlowerOrVegetation(Block? block)
+        {
+            if (block == null) return false;
+            
+            string path = block.Code?.Path?.ToLowerInvariant() ?? "";
+            
+            // Check by block material - Plant material is vegetation
+            if (block.BlockMaterial == EnumBlockMaterial.Plant)
+            {
+                return true;
+            }
+            
+            // Check by code path for flowers and vegetation
+            if (path.Contains("flower") || path.Contains("mushroom") || 
+                path.Contains("fern") || path.Contains("tallgrass") ||
+                path.Contains("clover") || path.Contains("bush") ||
+                path.Contains("sapling") || path.Contains("seaweed") ||
+                path.Contains("kelp") || path.Contains("algae") ||
+                path.Contains("reeds") || path.Contains("cattail") ||
+                path.Contains("crystals") || path.Contains("coral") ||
+                path.Contains("starfish") || path.Contains("shell") ||
+                path.Contains("bones") || path.Contains("skull") ||
+                path.Contains("feather") || path.Contains("egg") ||
+                path.Contains("nest") || path.Contains("berries") ||
+                path.Contains("berry"))
+            {
+                return true;
+            }
+            
+            // Also check for short grass and plant variants
+            if (path.Contains("grass") && (path.Contains("-") || path.Contains("short")))
+            {
+                return true;
+            }
+            
+return false;
         }
 
         // Main thread update (from VS-GeologyMap)
         public override void OnTick(float dt)
         {
+            genAccum += dt;
+            if (genAccum > 0.05f)
+            {
+                genAccum = 0;
+                int processed = 0;
+                while (processed < 10 && chunksToGen.Count > 0)
+                {
+                    FastVec2i cord;
+                    lock (chunksToGenLock)
+                    {
+                        if (chunksToGen.Count == 0) break;
+                        cord = chunksToGen.Dequeue();
+                    }
+
+                    var testPos = new BlockPos(cord.X * GlobalConstants.ChunkSize, 1, cord.Y * GlobalConstants.ChunkSize);
+                    if (!api.World.BlockAccessor.IsValidPos(testPos)) 
+                    {
+                        processed++;
+                        continue;
+                    }
+
+                    IMapChunk mc = capi!.World.BlockAccessor.GetMapChunk(cord.X, cord.Y);
+                    if (mc == null)
+                    {
+                        try
+                        {
+                            MapPieceDB piece = mapdb!.GetMapPiece(cord);
+                            if (piece?.Pixels != null)
+                            {
+                                LoadFromChunkPixels(cord, piece.Pixels);
+                            }
+                        }
+                        catch { }
+                        processed++;
+                        continue;
+                    }
+
+                    int[] pixels = GenerateChunkImage(cord, mc);
+                    if (pixels != null)
+                    {
+                        toSaveList[cord.Copy()] = new MapPieceDB() { Pixels = pixels };
+                        LoadFromChunkPixels(cord, pixels);
+                    }
+                    processed++;
+                }
+
+                if (toSaveList.Count > 50)
+                {
+                    mapdb!.SetMapPieces(toSaveList);
+                    toSaveList.Clear();
+                }
+            }
+
             if (!readyMapPieces.IsEmpty)
             {
                 int q = Math.Min(readyMapPieces.Count, 200);
@@ -524,14 +576,13 @@ namespace TrueColorLayer
                 kvp.Value.OnMouseMove(args, mapElem, hoverText);
             }
 
-            // Add climate info
-            if (mapElem.Api is ICoreClientAPI capi)
+            // Add climate info — use the field-level capi, not a shadowed local
             {
                 Vec3d worldPos = new Vec3d();
                 mapElem.TranslateViewPosToWorldPos(new Vec2f(args.X, args.Y), ref worldPos);
-                
+
                 BlockPos pos = new BlockPos((int)worldPos.X, 0, (int)worldPos.Z);
-                
+
                 var world = capi!.World;
                 IMapChunk mc = world.BlockAccessor.GetMapChunk(
                     pos.X / GlobalConstants.ChunkSize,
