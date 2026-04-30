@@ -4,8 +4,8 @@
         <TargetFramework>net8.0</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
-        <AssemblyName>TrueColorLayer</AssemblyName>
-        <RootNamespace>TrueColorLayer</RootNamespace>
+    <AssemblyName>truecolorlayer</AssemblyName>
+    <RootNamespace>truecolorlayer</RootNamespace>
         <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
         <OutputPath>bin\$(Configuration)\Mods\mod</OutputPath>
     </PropertyGroup>
