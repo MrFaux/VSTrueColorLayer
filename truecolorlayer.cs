@@ -19,6 +19,8 @@ namespace TrueColorLayer
     {
         public bool ReplaceDefaultMap { get; set; } = false;
         public bool DisableSnowInWinter { get; set; } = true;
+        public bool EnableBlur { get; set; } = false;
+        public int MaxChunksPerTick { get; set; } = 8;
     }
 
     // ─── Map layer ────────────────────────────────────────────────────────────
@@ -31,7 +33,11 @@ namespace TrueColorLayer
         private HashSet<FastVec2i> curVisibleChunks = new HashSet<FastVec2i>();
         private ConcurrentQueue<ReadyMapPiece> readyMapPieces = new ConcurrentQueue<ReadyMapPiece>();
         private Dictionary<FastVec2i, MapPieceDB> toSaveList = new Dictionary<FastVec2i, MapPieceDB>();
-        private ConcurrentDictionary<FastVec2i, MultiChunkMapComponent> loadedMapData = new ConcurrentDictionary<FastVec2i, MultiChunkMapComponent>();
+        private readonly object toSaveListLock = new object();
+        private HashSet<FastVec2i> chunksBeingGenerated = new HashSet<FastVec2i>();
+        private ConcurrentDictionary<long, MultiChunkMapComponent> loadedMapData = new ConcurrentDictionary<long, MultiChunkMapComponent>();
+        private ConcurrentDictionary<FastVec2i, byte> missingNeighboursMap = new ConcurrentDictionary<FastVec2i, byte>();
+        private readonly object visibleChunksLock = new object();
         private float mtThread1secAccum;
         private float genAccum;
 
@@ -49,6 +55,7 @@ namespace TrueColorLayer
 
             if (api.Side == EnumAppSide.Client)
             {
+                api.Event.ChunkDirty += OnChunkDirty;
                 api.World.Logger.Notification("[TrueColorLayer] Loading map cache db...");
                 mapdb = new MapDB(api.World.Logger);
                 string mapDbPath = GetMapDbFilePath();
@@ -75,36 +82,40 @@ namespace TrueColorLayer
 
         public override void OnMapClosedClient()
         {
-            lock (chunksToGenLock) { chunksToGen.Clear(); }
-            curVisibleChunks.Clear();
+            lock (toSaveListLock)
+            {
+                if (toSaveList.Count > 0)
+                {
+                    mapdb?.SetMapPieces(toSaveList);
+                    toSaveList.Clear();
+                }
+            }
+            lock (chunksToGenLock) { chunksToGen.Clear(); chunksBeingGenerated.Clear(); }
+            lock (visibleChunksLock) { curVisibleChunks.Clear(); }
+            missingNeighboursMap.Clear();
             this.Active = false;
         }
 
-        // ThreadStatic so each thread gets its own buffer (GenerateChunkImage runs on the main thread only)
+        // ThreadStatic so each thread pool thread gets its own buffer
         [ThreadStatic] static byte[]? shadowMapReusable;
         [ThreadStatic] static byte[]? tempReusable;
 
         // Thread-safe block-classification cache
-        static readonly ConcurrentDictionary<string, bool> snowCache = new ConcurrentDictionary<string, bool>();
-        static readonly ConcurrentDictionary<string, bool> plantCache = new ConcurrentDictionary<string, bool>();
+        static readonly ConcurrentDictionary<int, bool> snowCache = new ConcurrentDictionary<int, bool>();
+        static readonly ConcurrentDictionary<int, bool> plantCache = new ConcurrentDictionary<int, bool>();
 
         // ─── Core image generation ────────────────────────────────────────────
-        public int[] GenerateChunkImage(FastVec2i chunkPos, IMapChunk mc)
+        public int[] GenerateChunkImage(FastVec2i chunkPos, IMapChunk mc, IMapChunk? neibW, IMapChunk? neibN, IMapChunk? neibNW)
         {
             int cs = GlobalConstants.ChunkSize;
             int[] result = new int[cs * cs];
 
             shadowMapReusable ??= new byte[cs * cs];
             byte[] shadowMap = shadowMapReusable;
-            for (int i = 0; i < shadowMap.Length; i++) shadowMap[i] = 128;
+            Array.Fill(shadowMap, (byte)128);
 
             var world = capi!.World;
             bool snowSkip = TrueColorLayerModSystem.Config?.DisableSnowInWinter == true;
-
-            // Pre-fetch neighbour map chunks. Never fall back to mc — null → flat (0 diff).
-            IMapChunk? neibW  = world.BlockAccessor.GetMapChunk(chunkPos.X - 1, chunkPos.Y);
-            IMapChunk? neibN  = world.BlockAccessor.GetMapChunk(chunkPos.X,     chunkPos.Y - 1);
-            IMapChunk? neibNW = world.BlockAccessor.GetMapChunk(chunkPos.X - 1, chunkPos.Y - 1);
 
             // Reuse ONE BlockPos for all GetBlock calls — avoids ~hundreds of heap allocations
             // per chunk render. BlockPos.Set() mutates in place and returns this.
@@ -144,11 +155,11 @@ namespace TrueColorLayer
 
                 float slopedir  = Math.Sign(diffW) + Math.Sign(diffN) + Math.Sign(diffNW);
                 float steepness = Math.Max(Math.Max(Math.Abs(diffW), Math.Abs(diffN)), Math.Abs(diffNW));
-                float heightFactor = Math.Min(1f, steepness / 8f);
+                float heightFactor = Math.Min(1f, steepness / 24f);
 
                 float b;
-                if      (slopedir > 0) b = 1.12f + heightFactor * 0.4f;
-                else if (slopedir < 0) b = 0.88f - heightFactor * 0.4f;
+                if      (slopedir > 0) b = 1.15f + heightFactor * 0.5f;
+                else if (slopedir < 0) b = 0.85f - heightFactor * 0.5f;
                 else                   b = 1f;
 
                 shadowMap[i] = (byte)GameMath.Clamp((int)(128 * b), 0, 255);
@@ -156,13 +167,26 @@ namespace TrueColorLayer
                 // ── Block colour ──────────────────────────────────────────────
                 var block = world.BlockAccessor.GetBlock(bp.Set(worldX, surfaceY, worldZ));
 
+                // 0) If the heightmap points to air (stale data), dig down until we find a block
+                if (block == null || block.Id == 0)
+                {
+                    for (int y = surfaceY - 1; y > 0; y--)
+                    {
+                        var bb = world.BlockAccessor.GetBlock(bp.Set(worldX, y, worldZ));
+                        if (bb == null) break;
+                        if (bb.Id != 0) { block = bb; surfaceY = y; break; }
+                    }
+                    bp.Set(worldX, surfaceY, worldZ);
+                }
+
                 // 1) Skip seasonal snow/ice — reveal terrain beneath
                 if (snowSkip && block != null && (IsSeasonalSnow(block) || IsSeasonalIce(block)))
                 {
-                    for (int y = surfaceY - 1; y > Math.Max(0, surfaceY - 10); y--)
+                    for (int y = surfaceY - 1; y > 0; y--)
                     {
                         var bb = world.BlockAccessor.GetBlock(bp.Set(worldX, y, worldZ));
-                        if (bb == null || bb.Id == 0) continue;
+                        if (bb == null) break;
+                        if (bb.Id == 0) continue;
                         if (!IsSeasonalSnow(bb) && !IsSeasonalIce(bb)) { block = bb; surfaceY = y; break; }
                     }
                     // Keep bp pointing at the correct position for GetColor below
@@ -172,10 +196,11 @@ namespace TrueColorLayer
                 // 2) Skip non-solid vegetation — show solid block beneath
                 if (block != null && IsFlowerOrVegetation(block))
                 {
-                    for (int y = surfaceY - 1; y > Math.Max(0, surfaceY - 6); y--)
+                    for (int y = surfaceY - 1; y > 0; y--)
                     {
                         var bb = world.BlockAccessor.GetBlock(bp.Set(worldX, y, worldZ));
-                        if (bb == null || bb.Id == 0) continue;
+                        if (bb == null) break;
+                        if (bb.Id == 0) continue;
                         if (!IsFlowerOrVegetation(bb)) { block = bb; surfaceY = y; break; }
                     }
                     bp.Set(worldX, surfaceY, worldZ);
@@ -188,16 +213,22 @@ namespace TrueColorLayer
                 // 3) Last-resort: still 0 or near-white — dig one more block
                 if (color == 0 || (color & 0x00FFFFFF) >= 0x00F4F4F4)
                 {
-                    for (int y = surfaceY - 1; y > Math.Max(0, surfaceY - 4); y--)
+                    for (int y = surfaceY - 1; y > 0; y--)
                     {
                         var bb = world.BlockAccessor.GetBlock(bp.Set(worldX, y, worldZ));
-                        if (bb == null || bb.Id == 0) continue;
+                        if (bb == null) break;
+                        if (bb.Id == 0) continue;
                         int c2 = bb.GetColor(capi!, bp);
                         if (c2 != 0 && (c2 & 0x00FFFFFF) < 0x00F4F4F4) { color = c2; break; }
                     }
                 }
 
                 result[i] = color != 0 ? (color & 0x00FFFFFF) | (255 << 24) : 0;
+            }
+
+            if (TrueColorLayerModSystem.Config?.EnableBlur == true)
+            {
+                ApplySimpleBlur(shadowMap, cs, cs);
             }
 
             for (int i = 0; i < result.Length; i++)
@@ -252,19 +283,18 @@ namespace TrueColorLayer
         private bool IsSeasonalSnow(Block block)
         {
             if (block == null) return false;
-            string code = block.Code?.ToString() ?? "";
-            if (snowCache.TryGetValue(code, out bool cached)) return cached;
+            if (snowCache.TryGetValue(block.Id, out bool cached)) return cached;
 
             string path = block.Code?.Path?.ToLowerInvariant() ?? "";
 
             if (path.Contains("glacier") || path.Contains("permafrost"))
-                return snowCache[code] = false;
+                return snowCache[block.Id] = false;
 
             if (block.BlockMaterial == EnumBlockMaterial.Snow)
-                return snowCache[code] = true;
+                return snowCache[block.Id] = true;
 
             bool result = (path == "snow" || path.StartsWith("snow-")) && !path.Contains("block");
-            return snowCache[code] = result;
+            return snowCache[block.Id] = result;
         }
 
         /// <summary>Returns true for seasonal lake ice (not glacier/permafrost ice).</summary>
@@ -285,12 +315,11 @@ namespace TrueColorLayer
         private bool IsFlowerOrVegetation(Block? block)
         {
             if (block == null) return false;
-            string code = block.Code?.ToString() ?? "";
-            if (plantCache.TryGetValue(code, out bool cached)) return cached;
+            if (plantCache.TryGetValue(block.Id, out bool cached)) return cached;
 
             // Primary check: Plant material covers almost all non-solid vegetation
             if (block.BlockMaterial == EnumBlockMaterial.Plant)
-                return plantCache[code] = true;
+                return plantCache[block.Id] = true;
 
             string path = block.Code?.Path?.ToLowerInvariant() ?? "";
 
@@ -310,7 +339,7 @@ namespace TrueColorLayer
                 path.Contains("berries")||
                 (path.Contains("grass") && (path.Contains("-") || path.Contains("short")));
 
-            return plantCache[code] = result;
+            return plantCache[block.Id] = result;
         }
 
         // ─── Main thread update ───────────────────────────────────────────────
@@ -321,80 +350,156 @@ namespace TrueColorLayer
             {
                 genAccum = 0;
                 int processed = 0;
-                while (processed < 20 && chunksToGen.Count > 0)
+                int maxChunks = TrueColorLayerModSystem.Config?.MaxChunksPerTick ?? 8;
+                if (maxChunks <= 0) maxChunks = 8;
+
+                while (processed < maxChunks && chunksToGen.Count > 0)
                 {
                     FastVec2i cord;
                     lock (chunksToGenLock)
                     {
                         if (chunksToGen.Count == 0) break;
                         cord = chunksToGen.Dequeue();
+                        if (chunksBeingGenerated.Contains(cord)) continue;
+                        chunksBeingGenerated.Add(cord.Copy());
                     }
 
                     var testPos = new BlockPos(cord.X * GlobalConstants.ChunkSize, 1, cord.Y * GlobalConstants.ChunkSize);
-                    if (!api.World.BlockAccessor.IsValidPos(testPos)) { processed++; continue; }
+                    if (!api.World.BlockAccessor.IsValidPos(testPos)) 
+                    { 
+                        lock (chunksToGenLock) { chunksBeingGenerated.Remove(cord); }
+                        processed++; 
+                        continue; 
+                    }
 
                     IMapChunk mc = capi!.World.BlockAccessor.GetMapChunk(cord.X, cord.Y);
-                    if (mc == null)
+                    IMapChunk? neibW  = capi!.World.BlockAccessor.GetMapChunk(cord.X - 1, cord.Y);
+                    IMapChunk? neibN  = capi!.World.BlockAccessor.GetMapChunk(cord.X,     cord.Y - 1);
+                    IMapChunk? neibNW = capi!.World.BlockAccessor.GetMapChunk(cord.X - 1, cord.Y - 1);
+
+                    System.Threading.Tasks.Task.Run(() => 
                     {
                         try
                         {
-                            MapPieceDB piece = mapdb!.GetMapPiece(cord);
-                            if (piece?.Pixels != null) LoadFromChunkPixels(cord, piece.Pixels);
+                            if (mc == null)
+                            {
+                                MapPieceDB piece = mapdb!.GetMapPiece(cord);
+                                if (piece?.Pixels != null) 
+                                {
+                                    LoadFromChunkPixels(cord, piece.Pixels);
+                                }
+                                else 
+                                {
+                                    lock (chunksToGenLock) { chunksToGen.Enqueue(cord.Copy()); }
+                                }
+                            }
+                            else
+                            {
+                                int[] pixels = GenerateChunkImage(cord, mc, neibW, neibN, neibNW);
+                                if (pixels != null)
+                                {
+                                    lock (toSaveListLock)
+                                    {
+                                        toSaveList[cord.Copy()] = new MapPieceDB() { Pixels = pixels };
+                                    }
+                                    LoadFromChunkPixels(cord, pixels);
+
+                                    byte missingFlags = 0;
+                                    if (neibW == null) missingFlags |= 1;
+                                    if (neibN == null) missingFlags |= 2;
+                                    if (neibNW == null) missingFlags |= 4;
+
+                                    if (missingFlags > 0)
+                                        missingNeighboursMap[cord.Copy()] = missingFlags;
+
+                                    var east      = new FastVec2i(cord.X + 1, cord.Y);
+                                    var south     = new FastVec2i(cord.X,     cord.Y + 1);
+                                    var southeast = new FastVec2i(cord.X + 1, cord.Y + 1);
+
+                                    lock (chunksToGenLock)
+                                    lock (visibleChunksLock)
+                                    {
+                                        if (missingNeighboursMap.TryGetValue(east, out byte eFlags) && (eFlags & 1) != 0)
+                                        {
+                                            eFlags &= 0xFE;
+                                            if (eFlags == 0) missingNeighboursMap.TryRemove(east, out _);
+                                            else missingNeighboursMap[east] = eFlags;
+                                            if (curVisibleChunks.Contains(east)) chunksToGen.Enqueue(east);
+                                        }
+                                        if (missingNeighboursMap.TryGetValue(south, out byte sFlags) && (sFlags & 2) != 0)
+                                        {
+                                            sFlags &= 0xFD;
+                                            if (sFlags == 0) missingNeighboursMap.TryRemove(south, out _);
+                                            else missingNeighboursMap[south] = sFlags;
+                                            if (curVisibleChunks.Contains(south)) chunksToGen.Enqueue(south);
+                                        }
+                                        if (missingNeighboursMap.TryGetValue(southeast, out byte seFlags) && (seFlags & 4) != 0)
+                                        {
+                                            seFlags &= 0xFB;
+                                            if (seFlags == 0) missingNeighboursMap.TryRemove(southeast, out _);
+                                            else missingNeighboursMap[southeast] = seFlags;
+                                            if (curVisibleChunks.Contains(southeast)) chunksToGen.Enqueue(southeast);
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        catch { }
-                        processed++;
-                        continue;
-                    }
-
-                    int[] pixels = GenerateChunkImage(cord, mc);
-                    if (pixels != null)
-                    {
-                        toSaveList[cord.Copy()] = new MapPieceDB() { Pixels = pixels };
-                        LoadFromChunkPixels(cord, pixels);
-
-                        // After rendering `cord`, its East and South neighbours use this chunk
-                        // as *their* West/North neighbour respectively. If those neighbours were
-                        // already rendered while this chunk was still null, their border shading
-                        // used the flat (0-diff) fallback and now has a seam. Re-queue them so
-                        // they get a correct re-render now that this chunk is available.
-                        // Only re-queue if the neighbour is currently visible (avoids wasted work).
-                        lock (chunksToGenLock)
+                        catch (Exception ex)
                         {
-                            var east  = new FastVec2i(cord.X + 1, cord.Y);
-                            var south = new FastVec2i(cord.X,     cord.Y + 1);
-                            if (curVisibleChunks.Contains(east))  chunksToGen.Enqueue(east);
-                            if (curVisibleChunks.Contains(south)) chunksToGen.Enqueue(south);
+                            capi!.World.Logger.VerboseDebug("[TrueColorLayer] Background generation skipped a chunk: " + ex.Message);
                         }
-                    }
+                        finally
+                        {
+                            lock (chunksToGenLock) { chunksBeingGenerated.Remove(cord); }
+                        }
+                    });
+
                     processed++;
                 }
 
-                if (toSaveList.Count > 50)
+                Dictionary<FastVec2i, MapPieceDB>? listToSave = null;
+                lock (toSaveListLock)
                 {
-                    mapdb!.SetMapPieces(toSaveList);
-                    toSaveList.Clear();
+                    if (toSaveList.Count > 50)
+                    {
+                        listToSave = toSaveList;
+                        toSaveList = new Dictionary<FastVec2i, MapPieceDB>();
+                    }
+                }
+
+                if (listToSave != null)
+                {
+                    System.Threading.Tasks.Task.Run(() => 
+                    {
+                        try { mapdb!.SetMapPieces(listToSave); }
+                        catch (Exception ex) { capi!.World.Logger.Warning("[TrueColorLayer] Error saving map pieces: " + ex.Message); }
+                    });
                 }
             }
 
             if (!readyMapPieces.IsEmpty)
             {
                 int q = Math.Min(readyMapPieces.Count, 200);
-                List<MultiChunkMapComponent> modified = new List<MultiChunkMapComponent>();
+                HashSet<MultiChunkMapComponent> modified = new HashSet<MultiChunkMapComponent>();
                 while (q-- > 0)
                 {
                     if (readyMapPieces.TryDequeue(out var mapPiece))
                     {
-                        FastVec2i mcord = new FastVec2i(
-                            mapPiece.Cord.X / MultiChunkMapComponent.ChunkLen,
-                            mapPiece.Cord.Y / MultiChunkMapComponent.ChunkLen);
-                        FastVec2i baseCord = new FastVec2i(
-                            mcord.X * MultiChunkMapComponent.ChunkLen,
-                            mcord.Y * MultiChunkMapComponent.ChunkLen);
+                        int mcX = mapPiece.Cord.X / MultiChunkMapComponent.ChunkLen;
+                        int mcY = mapPiece.Cord.Y / MultiChunkMapComponent.ChunkLen;
+                        long mcordKey = ((long)mcX << 32) | (uint)mcY;
 
-                        if (!loadedMapData.TryGetValue(mcord, out var mccomp))
-                            loadedMapData[mcord] = mccomp = new MultiChunkMapComponent(capi, baseCord);
+                        if (!loadedMapData.TryGetValue(mcordKey, out var mccomp))
+                        {
+                            FastVec2i baseCord = new FastVec2i(
+                                mcX * MultiChunkMapComponent.ChunkLen,
+                                mcY * MultiChunkMapComponent.ChunkLen);
+                            loadedMapData[mcordKey] = mccomp = new MultiChunkMapComponent(capi, baseCord);
+                        }
 
-                        mccomp.setChunk(mapPiece.Cord.X - baseCord.X, mapPiece.Cord.Y - baseCord.Y, mapPiece.Pixels);
+                        mccomp.setChunk(mapPiece.Cord.X - (mcX * MultiChunkMapComponent.ChunkLen), 
+                                        mapPiece.Cord.Y - (mcY * MultiChunkMapComponent.ChunkLen), 
+                                        mapPiece.Pixels);
                         modified.Add(mccomp);
                     }
                 }
@@ -404,11 +509,14 @@ namespace TrueColorLayer
             mtThread1secAccum += dt;
             if (mtThread1secAccum > 1)
             {
-                List<FastVec2i> toRemove = new List<FastVec2i>();
+                List<long> toRemove = new List<long>();
                 foreach (var val in loadedMapData)
                 {
                     var mcmp = val.Value;
-                    if (!mcmp.AnyChunkSet || !mcmp.IsVisible(curVisibleChunks))
+                    bool isVisible;
+                    lock (visibleChunksLock) { isVisible = mcmp.IsVisible(curVisibleChunks); }
+
+                    if (!mcmp.AnyChunkSet || !isVisible)
                     {
                         mcmp.TTL--;
                         if (mcmp.TTL <= 0) { toRemove.Add(val.Key); mcmp.ActuallyDispose(); }
@@ -426,16 +534,17 @@ namespace TrueColorLayer
         // ─── View change ──────────────────────────────────────────────────────
         public override void OnViewChangedClient(List<FastVec2i> nowVisible, List<FastVec2i> nowHidden)
         {
-            foreach (var val in nowVisible) curVisibleChunks.Add(val);
-            foreach (var val in nowHidden)  curVisibleChunks.Remove(val);
+            lock (visibleChunksLock)
+            {
+                foreach (var val in nowVisible) curVisibleChunks.Add(val);
+                foreach (var val in nowHidden)  curVisibleChunks.Remove(val);
+            }
 
             lock (chunksToGenLock)
             {
                 foreach (FastVec2i cord in nowVisible)
                 {
-                    FastVec2i tmpMccoord = new FastVec2i(
-                        cord.X / MultiChunkMapComponent.ChunkLen,
-                        cord.Y / MultiChunkMapComponent.ChunkLen);
+                    long tmpMccoord = ((long)(cord.X / MultiChunkMapComponent.ChunkLen) << 32) | (uint)(cord.Y / MultiChunkMapComponent.ChunkLen);
 
                     int dx = cord.X % MultiChunkMapComponent.ChunkLen;
                     int dz = cord.Y % MultiChunkMapComponent.ChunkLen;
@@ -451,9 +560,7 @@ namespace TrueColorLayer
             foreach (FastVec2i cord in nowHidden)
             {
                 if (cord.X < 0 || cord.Y < 0) continue;
-                FastVec2i mcord = new FastVec2i(
-                    cord.X / MultiChunkMapComponent.ChunkLen,
-                    cord.Y / MultiChunkMapComponent.ChunkLen);
+                long mcord = ((long)(cord.X / MultiChunkMapComponent.ChunkLen) << 32) | (uint)(cord.Y / MultiChunkMapComponent.ChunkLen);
                 if (loadedMapData.TryGetValue(mcord, out var mc))
                     mc.unsetChunk(cord.X % MultiChunkMapComponent.ChunkLen, cord.Y % MultiChunkMapComponent.ChunkLen);
             }
@@ -502,17 +609,43 @@ namespace TrueColorLayer
             readyMapPieces.Enqueue(new ReadyMapPiece { Pixels = pixels, Cord = cord });
         }
 
+        private void OnChunkDirty(Vec3i chunkCoord, IWorldChunk chunk, EnumChunkDirtyReason reason)
+        {
+            long tmpMccoord = ((long)(chunkCoord.X / MultiChunkMapComponent.ChunkLen) << 32) | (uint)(chunkCoord.Z / MultiChunkMapComponent.ChunkLen);
+
+            bool isVisible;
+            lock (visibleChunksLock) { isVisible = curVisibleChunks.Contains(new FastVec2i(chunkCoord.X, chunkCoord.Z)); }
+
+            if (!loadedMapData.ContainsKey(tmpMccoord) && !isVisible)
+                return;
+
+            lock (chunksToGenLock)
+            {
+                chunksToGen.Enqueue(new FastVec2i(chunkCoord.X, chunkCoord.Z));
+            }
+        }
+
         public override void Dispose()
         {
+            if (capi != null) capi.Event.ChunkDirty -= OnChunkDirty;
+            
             if (loadedMapData != null)
                 foreach (var val in loadedMapData.Values) val?.ActuallyDispose();
+            lock (toSaveListLock)
+            {
+                if (toSaveList.Count > 0)
+                {
+                    mapdb?.SetMapPieces(toSaveList);
+                    toSaveList.Clear();
+                }
+            }
+            mapdb?.Dispose();
             base.Dispose();
         }
 
         public override void OnShutDown()
         {
             MultiChunkMapComponent.DisposeStatic();
-            mapdb?.Dispose();
         }
     }
 
@@ -549,7 +682,7 @@ namespace TrueColorLayer
             }
             catch (Exception ex)
             {
-                api.Logger.Warning("[TrueColorLayer] Harmony patching failed: " + ex.Message);
+                api.Logger.Warning("[TrueColorLayer] Harmony patching failed: " + ex.ToString());
             }
         }
 
