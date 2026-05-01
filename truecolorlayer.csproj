@@ -53,16 +53,13 @@
     </ItemGroup>
 
 <ItemGroup>
-         <Content Include="modinfo.json">
-             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-         </Content>
-         <Content Include="truecolorlayer.json">
-             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-         </Content>
-         <Content Include="assets\**\*">
-             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-         </Content>
-    </ItemGroup>
+<Content Include="modinfo.json">
+    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+</Content>
+<Content Include="assets\**\*">
+    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+</Content>
+</ItemGroup>
 
     <ItemGroup>
         <Compile Remove="TrueColorLayer-1.2.0\**" />
@@ -81,7 +78,6 @@
         <!-- Copy only the DLL and essential files -->
         <Copy SourceFiles="$(ModSrc)TrueColorLayer.dll" DestinationFolder="$(ModsDest)" SkipUnchangedFiles="true" />
         <Copy SourceFiles="$(MSBuildProjectDirectory)\modinfo.json" DestinationFolder="$(ModsDest)" SkipUnchangedFiles="true" />
-        <Copy SourceFiles="$(MSBuildProjectDirectory)\truecolorlayer.json" DestinationFolder="$(ModsDest)" SkipUnchangedFiles="true" />
         <!-- Copy assets folder recursively -->
         <ItemGroup>
             <AssetsFiles Include="$(MSBuildProjectDirectory)\assets\**\*" />
