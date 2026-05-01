@@ -28,6 +28,8 @@ namespace TrueColorLayer
     {
         private ICoreClientAPI? capi;
         private MapDB? mapdb;
+        private readonly object dbLock = new object();
+        private bool isDisposed = false;
         private readonly object chunksToGenLock = new object();
         private UniqueQueue<FastVec2i> chunksToGen = new UniqueQueue<FastVec2i>();
         private HashSet<FastVec2i> curVisibleChunks = new HashSet<FastVec2i>();
@@ -99,7 +101,13 @@ namespace TrueColorLayer
                     chunksInDbQueue.TryRemove(cord, out _);
                     try
                     {
-                        MapPieceDB piece = mapdb!.GetMapPiece(cord);
+                        MapPieceDB? piece = null;
+                        lock (dbLock) 
+                        {
+                            if (isDisposed) break;
+                            piece = mapdb!.GetMapPiece(cord);
+                        }
+                        
                         if (piece?.Pixels != null)
                         {
                             LoadFromChunkPixels(cord, piece.Pixels);
@@ -128,7 +136,10 @@ namespace TrueColorLayer
             {
                 if (toSaveList.Count > 0)
                 {
-                    mapdb?.SetMapPieces(toSaveList);
+                    lock (dbLock)
+                    {
+                        if (!isDisposed) mapdb?.SetMapPieces(toSaveList);
+                    }
                     toSaveList.Clear();
                 }
             }
@@ -508,7 +519,13 @@ namespace TrueColorLayer
                 {
                     System.Threading.Tasks.Task.Run(() => 
                     {
-                        try { mapdb!.SetMapPieces(listToSave); }
+                        try 
+                        { 
+                            lock (dbLock) 
+                            {
+                                if (!isDisposed) mapdb!.SetMapPieces(listToSave); 
+                            }
+                        }
                         catch (Exception ex) { capi!.World.Logger.Warning("[TrueColorLayer] Error saving map pieces: " + ex.Message); }
                     });
                 }
@@ -523,7 +540,9 @@ namespace TrueColorLayer
                     if (readyMapPieces.TryDequeue(out var mapPiece))
                     {
                         int mcX = mapPiece.Cord.X / MultiChunkMapComponent.ChunkLen;
+                        if (mapPiece.Cord.X < 0 && mapPiece.Cord.X % MultiChunkMapComponent.ChunkLen != 0) mcX--;
                         int mcY = mapPiece.Cord.Y / MultiChunkMapComponent.ChunkLen;
+                        if (mapPiece.Cord.Y < 0 && mapPiece.Cord.Y % MultiChunkMapComponent.ChunkLen != 0) mcY--;
                         long mcordKey = ((long)mcX << 32) | (uint)mcY;
 
                         if (!loadedMapData.TryGetValue(mcordKey, out var mccomp))
@@ -579,11 +598,15 @@ namespace TrueColorLayer
 
             foreach (FastVec2i cord in nowVisible)
             {
-                long tmpMccoord = ((long)(cord.X / MultiChunkMapComponent.ChunkLen) << 32) | (uint)(cord.Y / MultiChunkMapComponent.ChunkLen);
+                int mcX = cord.X / MultiChunkMapComponent.ChunkLen;
+                if (cord.X < 0 && cord.X % MultiChunkMapComponent.ChunkLen != 0) mcX--;
+                int mcY = cord.Y / MultiChunkMapComponent.ChunkLen;
+                if (cord.Y < 0 && cord.Y % MultiChunkMapComponent.ChunkLen != 0) mcY--;
 
-                int dx = cord.X % MultiChunkMapComponent.ChunkLen;
-                int dz = cord.Y % MultiChunkMapComponent.ChunkLen;
-                if (dx < 0 || dz < 0) continue;
+                long tmpMccoord = ((long)mcX << 32) | (uint)mcY;
+
+                int dx = cord.X - (mcX * MultiChunkMapComponent.ChunkLen);
+                int dz = cord.Y - (mcY * MultiChunkMapComponent.ChunkLen);
 
                 if (loadedMapData.TryGetValue(tmpMccoord, out var mcomp) && mcomp.IsChunkSet(dx, dz))
                     continue; // already rendered
@@ -596,10 +619,14 @@ namespace TrueColorLayer
 
             foreach (FastVec2i cord in nowHidden)
             {
-                if (cord.X < 0 || cord.Y < 0) continue;
-                long mcord = ((long)(cord.X / MultiChunkMapComponent.ChunkLen) << 32) | (uint)(cord.Y / MultiChunkMapComponent.ChunkLen);
+                int mcX = cord.X / MultiChunkMapComponent.ChunkLen;
+                if (cord.X < 0 && cord.X % MultiChunkMapComponent.ChunkLen != 0) mcX--;
+                int mcY = cord.Y / MultiChunkMapComponent.ChunkLen;
+                if (cord.Y < 0 && cord.Y % MultiChunkMapComponent.ChunkLen != 0) mcY--;
+
+                long mcord = ((long)mcX << 32) | (uint)mcY;
                 if (loadedMapData.TryGetValue(mcord, out var mc))
-                    mc.unsetChunk(cord.X % MultiChunkMapComponent.ChunkLen, cord.Y % MultiChunkMapComponent.ChunkLen);
+                    mc.unsetChunk(cord.X - (mcX * MultiChunkMapComponent.ChunkLen), cord.Y - (mcY * MultiChunkMapComponent.ChunkLen));
             }
         }
 
@@ -648,7 +675,12 @@ namespace TrueColorLayer
 
         private void OnChunkDirty(Vec3i chunkCoord, IWorldChunk chunk, EnumChunkDirtyReason reason)
         {
-            long tmpMccoord = ((long)(chunkCoord.X / MultiChunkMapComponent.ChunkLen) << 32) | (uint)(chunkCoord.Z / MultiChunkMapComponent.ChunkLen);
+            int mcX = chunkCoord.X / MultiChunkMapComponent.ChunkLen;
+            if (chunkCoord.X < 0 && chunkCoord.X % MultiChunkMapComponent.ChunkLen != 0) mcX--;
+            int mcZ = chunkCoord.Z / MultiChunkMapComponent.ChunkLen;
+            if (chunkCoord.Z < 0 && chunkCoord.Z % MultiChunkMapComponent.ChunkLen != 0) mcZ--;
+
+            long tmpMccoord = ((long)mcX << 32) | (uint)mcZ;
 
             bool isVisible;
             lock (visibleChunksLock) { isVisible = curVisibleChunks.Contains(new FastVec2i(chunkCoord.X, chunkCoord.Z)); }
@@ -673,11 +705,18 @@ namespace TrueColorLayer
             {
                 if (toSaveList.Count > 0)
                 {
-                    mapdb?.SetMapPieces(toSaveList);
+                    lock (dbLock)
+                    {
+                        if (!isDisposed) mapdb?.SetMapPieces(toSaveList);
+                    }
                     toSaveList.Clear();
                 }
             }
-            mapdb?.Dispose();
+            lock (dbLock)
+            {
+                isDisposed = true;
+                mapdb?.Dispose();
+            }
             base.Dispose();
         }
 
