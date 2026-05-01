@@ -35,6 +35,12 @@ namespace TrueColorLayer
         private Dictionary<FastVec2i, MapPieceDB> toSaveList = new Dictionary<FastVec2i, MapPieceDB>();
         private readonly object toSaveListLock = new object();
         private HashSet<FastVec2i> chunksBeingGenerated = new HashSet<FastVec2i>();
+        
+        // Dedicated DB Load Queue
+        private System.Threading.CancellationTokenSource? dbCts;
+        private ConcurrentQueue<FastVec2i> dbLoadQueue = new ConcurrentQueue<FastVec2i>();
+        private ConcurrentDictionary<FastVec2i, bool> chunksInDbQueue = new ConcurrentDictionary<FastVec2i, bool>();
+
         private ConcurrentDictionary<long, MultiChunkMapComponent> loadedMapData = new ConcurrentDictionary<long, MultiChunkMapComponent>();
         private ConcurrentDictionary<FastVec2i, byte> missingNeighboursMap = new ConcurrentDictionary<FastVec2i, byte>();
         private readonly object visibleChunksLock = new object();
@@ -77,11 +83,47 @@ namespace TrueColorLayer
         {
             base.OnMapOpenedClient();
             this.Active = true;
+            
+            dbCts = new System.Threading.CancellationTokenSource();
+            System.Threading.Tasks.Task.Run(() => DbLoadLoop(dbCts.Token));
+
             capi!.World.Logger.Notification($"[TrueColorLayer] Map opened. Chunks cached: {loadedMapData.Count}");
+        }
+
+        private void DbLoadLoop(System.Threading.CancellationToken token)
+        {
+            while (!token.IsCancellationRequested)
+            {
+                if (dbLoadQueue.TryDequeue(out FastVec2i cord))
+                {
+                    chunksInDbQueue.TryRemove(cord, out _);
+                    try
+                    {
+                        MapPieceDB piece = mapdb!.GetMapPiece(cord);
+                        if (piece?.Pixels != null)
+                        {
+                            LoadFromChunkPixels(cord, piece.Pixels);
+                        }
+                        else
+                        {
+                            lock (chunksToGenLock) { chunksToGen.Enqueue(cord.Copy()); }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        capi?.World.Logger.VerboseDebug("[TrueColorLayer] DB load error: " + ex);
+                    }
+                }
+                else
+                {
+                    System.Threading.Thread.Sleep(10);
+                }
+            }
         }
 
         public override void OnMapClosedClient()
         {
+            dbCts?.Cancel();
             lock (toSaveListLock)
             {
                 if (toSaveList.Count > 0)
@@ -93,6 +135,8 @@ namespace TrueColorLayer
             lock (chunksToGenLock) { chunksToGen.Clear(); chunksBeingGenerated.Clear(); }
             lock (visibleChunksLock) { curVisibleChunks.Clear(); }
             missingNeighboursMap.Clear();
+            dbLoadQueue.Clear();
+            chunksInDbQueue.Clear();
             this.Active = false;
         }
 
@@ -368,11 +412,19 @@ namespace TrueColorLayer
                     if (!api.World.BlockAccessor.IsValidPos(testPos)) 
                     { 
                         lock (chunksToGenLock) { chunksBeingGenerated.Remove(cord); }
-                        processed++; 
-                        continue; 
+                        continue; // Do not increment processed for invalid chunks
                     }
 
                     IMapChunk mc = capi!.World.BlockAccessor.GetMapChunk(cord.X, cord.Y);
+                    
+                    if (mc == null)
+                    {
+                        // Chunk not in memory. Drop it from queue to prevent infinite loops.
+                        // It will be re-added naturally by OnChunkDirty if the player visits it.
+                        lock (chunksToGenLock) { chunksBeingGenerated.Remove(cord); }
+                        continue;
+                    }
+
                     IMapChunk? neibW  = capi!.World.BlockAccessor.GetMapChunk(cord.X - 1, cord.Y);
                     IMapChunk? neibN  = capi!.World.BlockAccessor.GetMapChunk(cord.X,     cord.Y - 1);
                     IMapChunk? neibNW = capi!.World.BlockAccessor.GetMapChunk(cord.X - 1, cord.Y - 1);
@@ -381,65 +433,50 @@ namespace TrueColorLayer
                     {
                         try
                         {
-                            if (mc == null)
+                            int[] pixels = GenerateChunkImage(cord, mc, neibW, neibN, neibNW);
+                            if (pixels != null)
                             {
-                                MapPieceDB piece = mapdb!.GetMapPiece(cord);
-                                if (piece?.Pixels != null) 
+                                lock (toSaveListLock)
                                 {
-                                    LoadFromChunkPixels(cord, piece.Pixels);
+                                    toSaveList[cord.Copy()] = new MapPieceDB() { Pixels = pixels };
                                 }
-                                else 
+                                LoadFromChunkPixels(cord, pixels);
+
+                                byte missingFlags = 0;
+                                if (neibW == null) missingFlags |= 1;
+                                if (neibN == null) missingFlags |= 2;
+                                if (neibNW == null) missingFlags |= 4;
+
+                                if (missingFlags > 0)
+                                    missingNeighboursMap[cord.Copy()] = missingFlags;
+
+                                var east      = new FastVec2i(cord.X + 1, cord.Y);
+                                var south     = new FastVec2i(cord.X,     cord.Y + 1);
+                                var southeast = new FastVec2i(cord.X + 1, cord.Y + 1);
+
+                                lock (chunksToGenLock)
+                                lock (visibleChunksLock)
                                 {
-                                    lock (chunksToGenLock) { chunksToGen.Enqueue(cord.Copy()); }
-                                }
-                            }
-                            else
-                            {
-                                int[] pixels = GenerateChunkImage(cord, mc, neibW, neibN, neibNW);
-                                if (pixels != null)
-                                {
-                                    lock (toSaveListLock)
+                                    if (missingNeighboursMap.TryGetValue(east, out byte eFlags) && (eFlags & 1) != 0)
                                     {
-                                        toSaveList[cord.Copy()] = new MapPieceDB() { Pixels = pixels };
+                                        eFlags &= 0xFE;
+                                        if (eFlags == 0) missingNeighboursMap.TryRemove(east, out _);
+                                        else missingNeighboursMap[east] = eFlags;
+                                        if (curVisibleChunks.Contains(east)) chunksToGen.Enqueue(east);
                                     }
-                                    LoadFromChunkPixels(cord, pixels);
-
-                                    byte missingFlags = 0;
-                                    if (neibW == null) missingFlags |= 1;
-                                    if (neibN == null) missingFlags |= 2;
-                                    if (neibNW == null) missingFlags |= 4;
-
-                                    if (missingFlags > 0)
-                                        missingNeighboursMap[cord.Copy()] = missingFlags;
-
-                                    var east      = new FastVec2i(cord.X + 1, cord.Y);
-                                    var south     = new FastVec2i(cord.X,     cord.Y + 1);
-                                    var southeast = new FastVec2i(cord.X + 1, cord.Y + 1);
-
-                                    lock (chunksToGenLock)
-                                    lock (visibleChunksLock)
+                                    if (missingNeighboursMap.TryGetValue(south, out byte sFlags) && (sFlags & 2) != 0)
                                     {
-                                        if (missingNeighboursMap.TryGetValue(east, out byte eFlags) && (eFlags & 1) != 0)
-                                        {
-                                            eFlags &= 0xFE;
-                                            if (eFlags == 0) missingNeighboursMap.TryRemove(east, out _);
-                                            else missingNeighboursMap[east] = eFlags;
-                                            if (curVisibleChunks.Contains(east)) chunksToGen.Enqueue(east);
-                                        }
-                                        if (missingNeighboursMap.TryGetValue(south, out byte sFlags) && (sFlags & 2) != 0)
-                                        {
-                                            sFlags &= 0xFD;
-                                            if (sFlags == 0) missingNeighboursMap.TryRemove(south, out _);
-                                            else missingNeighboursMap[south] = sFlags;
-                                            if (curVisibleChunks.Contains(south)) chunksToGen.Enqueue(south);
-                                        }
-                                        if (missingNeighboursMap.TryGetValue(southeast, out byte seFlags) && (seFlags & 4) != 0)
-                                        {
-                                            seFlags &= 0xFB;
-                                            if (seFlags == 0) missingNeighboursMap.TryRemove(southeast, out _);
-                                            else missingNeighboursMap[southeast] = seFlags;
-                                            if (curVisibleChunks.Contains(southeast)) chunksToGen.Enqueue(southeast);
-                                        }
+                                        sFlags &= 0xFD;
+                                        if (sFlags == 0) missingNeighboursMap.TryRemove(south, out _);
+                                        else missingNeighboursMap[south] = sFlags;
+                                        if (curVisibleChunks.Contains(south)) chunksToGen.Enqueue(south);
+                                    }
+                                    if (missingNeighboursMap.TryGetValue(southeast, out byte seFlags) && (seFlags & 4) != 0)
+                                    {
+                                        seFlags &= 0xFB;
+                                        if (seFlags == 0) missingNeighboursMap.TryRemove(southeast, out _);
+                                        else missingNeighboursMap[southeast] = seFlags;
+                                        if (curVisibleChunks.Contains(southeast)) chunksToGen.Enqueue(southeast);
                                     }
                                 }
                             }
@@ -540,20 +577,20 @@ namespace TrueColorLayer
                 foreach (var val in nowHidden)  curVisibleChunks.Remove(val);
             }
 
-            lock (chunksToGenLock)
+            foreach (FastVec2i cord in nowVisible)
             {
-                foreach (FastVec2i cord in nowVisible)
+                long tmpMccoord = ((long)(cord.X / MultiChunkMapComponent.ChunkLen) << 32) | (uint)(cord.Y / MultiChunkMapComponent.ChunkLen);
+
+                int dx = cord.X % MultiChunkMapComponent.ChunkLen;
+                int dz = cord.Y % MultiChunkMapComponent.ChunkLen;
+                if (dx < 0 || dz < 0) continue;
+
+                if (loadedMapData.TryGetValue(tmpMccoord, out var mcomp) && mcomp.IsChunkSet(dx, dz))
+                    continue; // already rendered
+
+                if (chunksInDbQueue.TryAdd(cord, true))
                 {
-                    long tmpMccoord = ((long)(cord.X / MultiChunkMapComponent.ChunkLen) << 32) | (uint)(cord.Y / MultiChunkMapComponent.ChunkLen);
-
-                    int dx = cord.X % MultiChunkMapComponent.ChunkLen;
-                    int dz = cord.Y % MultiChunkMapComponent.ChunkLen;
-                    if (dx < 0 || dz < 0) continue;
-
-                    if (loadedMapData.TryGetValue(tmpMccoord, out var mcomp) && mcomp.IsChunkSet(dx, dz))
-                        continue; // already rendered
-
-                    chunksToGen.Enqueue(cord.Copy());
+                    dbLoadQueue.Enqueue(cord.Copy());
                 }
             }
 
@@ -627,6 +664,7 @@ namespace TrueColorLayer
 
         public override void Dispose()
         {
+            dbCts?.Cancel();
             if (capi != null) capi.Event.ChunkDirty -= OnChunkDirty;
             
             if (loadedMapData != null)
