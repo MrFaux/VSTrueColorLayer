@@ -6,6 +6,7 @@ A client-side mod for [Vintage Story](https://www.vintagestory.at/) that adds a 
 *   **True Block Colors:** Renders map using actual block colors (like color-accurate mode)
 *   **3D Shading:** Height-based shading creates depth perception (brighten slopes up, darken slopes down)
 *   **Snow-Skipping:** Optional feature replaces seasonal snow with the ground below (preserves permafrost/glacier)
+*   **Season Independence:** Optional feature to force summer colors regardless of current season
 *   **Performance Optimized:** Reuses buffers (ThreadStatic), caches snow lookups, preserves cache between map opens
 *   **Client-Side Only:** Works on multiplayer servers without needing the mod installed on the server
 
@@ -14,7 +15,8 @@ Edit `VintagestoryData/ModConfig/truecolorlayer.json`:
 ```json
 {
   "ReplaceDefaultMap": false,     // Set true to replace the default "Paper" map tab
-  "DisableSnowInWinter": true    // Skip seasonal snow (default: true, preserves permafrost/glacier)
+  "DisableSnowInWinter": true,   // Skip seasonal snow (default: true, preserves permafrost/glacier)
+  "AlwaysSummerColors": false    // Force summer colors regardless of season (default: false)
 }
 ```
 

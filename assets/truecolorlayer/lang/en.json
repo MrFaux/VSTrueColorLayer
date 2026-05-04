@@ -3,5 +3,7 @@
   "config-truecolorlayer-replacedefaultmap": "Replace default map",
   "config-truecolorlayer-replacedefaultmap-desc": "Replace the default terrain map with the True Terrain map",
   "config-truecolorlayer-disablesnowinwinter": "Disable snow in winter",
-  "config-truecolorlayer-disablesnowinwinter-desc": "Prevent snow from being rendered on the map during winter"
+  "config-truecolorlayer-disablesnowinwinter-desc": "Prevent snow from being rendered on the map during winter",
+  "config-truecolorlayer-alwayssummercolors": "Always summer colors",
+  "config-truecolorlayer-alwayssummercolors-desc": "Force summer/spring colors regardless of current season"
 }
